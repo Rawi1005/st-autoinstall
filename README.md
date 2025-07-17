@@ -1,68 +1,54 @@
-
 # 🚀 SillyTavern Auto-Installer for Termux (STAGING)
 
-**One-line installer for SillyTavern on Android Termux**, with staging branch, color logging, and zero brainpower required.
-
-> Made for the Thai SillyTavern community — perfect for users who hate reading or just want things to *work*.
+Install **SillyTavern** (staging branch) on Android with Termux in one step—no experience needed!
 
 ---
 
-## 📋 Table of Contents
-1. [About](#about)  
-2. [Requirements](#requirements)  
-3. [Quickstart](#quickstart)  
-4. [Manual Usage](#manual-usage)  
-5. [Troubleshooting](#troubleshooting)  
-6. [Credits](#credits)  
-7. [License](#license)
+## 📋 What Does This Script Do?
 
----
-
-## 🧠 About
-
-This script automates setting up **SillyTavern** on Termux:
-
-- Updates Termux  
-- Installs `nodejs`, `git`, `esbuild`  
-- Clones repository  
-- Switches to `staging` branch  
-- Installs dependencies  
-- Launches the app  
-- Shows doc link for editor basics 😎
+- Updates Termux
+- Installs required packages: `nodejs`, `git`, `esbuild`
+- Downloads SillyTavern (staging branch)
+- Installs all dependencies
+- Starts SillyTavern automatically
+- Links you to a quick-start guide
 
 ---
 
 ## 🟢 Requirements
 
-**If you get errors like**  
+**If you see errors like:**
+- `bash: not found`
+- `curl: not found`
 
-bash: not found
-curl: not found
-
-**run this first in Termux:**
-
+Run this in Termux first:
 ```bash
 pkg update && pkg install -y curl bash
 ```
 
-⸻
+---
 
-🚀 Quickstart
+## 🚀 Quick Install
 
-Paste this in Termux:
+Copy and paste this command into Termux:
 ```bash
 curl -sL https://raw.githubusercontent.com/Rawi1005/st-autoinstall/main/install.sh | bash
 ```
-Sit back and watch it do everything. When it’s done:
-```bash
-✅ DONE! SillyTavern (staging) is installed and running!
-
-📘 Read this doc to learn the basics:
-https://sillytavern.rnsv.xyz/editor
-```
+Sit back and let it finish.  
+SillyTavern will start automatically when done!
 
 ---
-🙌 Credits
 
-Created by Rane
+## 📘 Learn the Basics
 
+Check out the basics here:  
+[https://sillytavern.rnsv.xyz/editor](https://sillytavern.rnsv.xyz/editor)
+
+---
+
+## 🙌 Credits
+
+Made by Rane  
+For the Thai SillyTavern community
+
+---

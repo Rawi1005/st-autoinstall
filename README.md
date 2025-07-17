@@ -1,5 +1,3 @@
-Absolutely! Here’s an updated README.md with a super-clear section for “If Termux says bash: not found or curl: not found” before the quickstart. This will make it idiot-proof and help anyone who’s missing dependencies.
-
 ⸻
 
 

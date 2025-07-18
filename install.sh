@@ -4,6 +4,13 @@ set -e
 # point to Termux’s prefix
 PREFIX=${PREFIX:-/data/data/com.termux/files/usr}
 
+# 0) Repair any half-configured packages
+echo -e "\e[93m[Fixing] Repairing broken dpkg state...\e[0m"
+dpkg --configure -a || {
+  echo -e "\e[93m[Fixing] Running apt-get install -f to resolve dependencies...\e[0m"
+  apt-get install -f
+}
+
 # 1) Force non-interactive mode and keep old conffiles
 export DEBIAN_FRONTEND=noninteractive
 mkdir -p "$PREFIX/etc/apt/apt.conf.d"

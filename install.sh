@@ -70,10 +70,10 @@ git pull --ff-only
 
 # ─── STEP 5: Install node_modules ─────────────────────────────────────────
 echo -e "\n\e[94m[Step 5/6] Installing node_modules...\e[0m"
-# If low-memory or ARM device, apply GC & heap workarounds
 if [ "$MEM_GB" -lt 1 ] || [[ "$ARCH" =~ ^(arm|i686)$ ]]; then
   echo -e "\e[93m[⚙️] Low-memory/ARM detected; using optimized install...\e[0m"
-  export NODE_OPTIONS="--max-old-space-size=2048 --no-separate-gc-phases"
+  # only cap memory, remove unstable GC flag
+  export NODE_OPTIONS="--max-old-space-size=2048"
   npm ci --no-optional
 else
   npm ci

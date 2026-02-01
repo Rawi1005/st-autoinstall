@@ -41,8 +41,8 @@ DPkg::Options {
 EOF
 
 echo -e "\e[92m=============================================="
-echo -e "  AUTO INSTALL ST.  V1.1 🚀"
-echo -e "  โปรแกรมติดตั้งอัตโนมัติ SillyTavern"
+echo -e "  AUTO INSTALL ST.  V1.2  🚀"
+echo -e "  โปรแกรมติดตั้งอัตโนมัติ SillyTavern แบบปล่อยจอย"
 echo -e "==============================================\e[0m"
 
 # ─── PRE-CHECK: Look for existing installation ─────────────────────────────
@@ -74,9 +74,37 @@ fi
 echo -e "\n\e[94m[Step 1/6] Updating packages... / กำลังอัปเดตแพ็กเกจ...\e[0m"
 apt update && apt upgrade -y
 
-# ─── STEP 2: Install dependencies ─────────────────────────────────────────
+# ─── STEP 2: Install dependencies & VERIFY ────────────────────────────────
 echo -e "\n\e[94m[Step 2/6] Installing nodejs, git, esbuild... / กำลังติดตั้ง dependencies...\e[0m"
 apt install nodejs git esbuild -y
+
+# --- Verification Function ---
+verify_install() {
+    local pkg_name=$1
+    local cmd_check=$2
+
+    if ! command -v "$cmd_check" &> /dev/null; then
+        echo -e "\n\e[93m[Retry] Command '$cmd_check' not found. Re-installing $pkg_name... / ไม่พบคำสั่ง '$cmd_check' กำลังติดตั้ง $pkg_name ใหม่...\e[0m"
+        # Try updating package list again just in case
+        apt update -y
+        apt install "$pkg_name" -y
+        
+        # Check again
+        if ! command -v "$cmd_check" &> /dev/null; then
+            echo -e "\n\e[91m[FATAL ERROR] Could not install '$pkg_name'. The script cannot continue."
+            echo -e "ไม่สามารถติดตั้ง '$pkg_name' ได้ สคริปต์ไม่สามารถทำงานต่อได้\e[0m"
+            echo -e "\e[93mTry running: 'pkg change-repo' and selecting a different mirror, then run this script again.\e[0m"
+            exit 1
+        fi
+    else
+        echo -e "\e[92m[✓] Verified $pkg_name is installed.\e[0m"
+    fi
+}
+
+# Verify critical packages
+verify_install "nodejs" "node"
+verify_install "git" "git"
+verify_install "esbuild" "esbuild"
 
 # ─── STEP 3: Clone SillyTavern ────────────────────────────────────────────
 echo -e "\n\e[94m[Step 3/6] Cloning SillyTavern repo... / กำลังโคลนข้อมูลจาก GitHub...\e[0m"

@@ -3,14 +3,15 @@ set -Eeuo pipefail
 
 # SillyTavern Termux auto-installer
 # Safe for: curl -fsSL https://raw.githubusercontent.com/Rawi1005/st-autoinstall/main/install.sh | bash
-# Uses Yarn for node_modules and checks Node/npm/Yarn health before install.
+# Default branch: staging
+# Uses Yarn for node_modules, but repairs/installs Node.js/npm/Yarn first.
 
 ST_REPO_URL="${ST_REPO_URL:-https://github.com/SillyTavern/SillyTavern.git}"
 ST_BRANCH="${ST_BRANCH:-staging}"
 ST_DIR="${ST_DIR:-$HOME/SillyTavern}"
-ST_MODE="${ST_MODE:-${ST_EXISTING_ACTION:-prompt}}"  # prompt, repair, backup, delete, cancel
-ST_LAUNCH="${ST_LAUNCH:-1}"                          # 1 = start server after install, 0 = install only
-ST_GLOBAL="${ST_GLOBAL:-0}"                          # 1 = start with --global
+ST_MODE="${ST_MODE:-prompt}"       # prompt, repair, backup, delete, cancel
+ST_LAUNCH="${ST_LAUNCH:-1}"        # 1 = launch after install, 0 = install only
+ST_GLOBAL="${ST_GLOBAL:-0}"        # 1 = node server.js --global
 ST_SKIP_UPGRADE="${ST_SKIP_UPGRADE:-0}"
 MIN_NODE_MAJOR="${MIN_NODE_MAJOR:-20}"
 
@@ -25,10 +26,12 @@ usage(){
 cat <<USAGE
 SillyTavern Termux installer using Yarn.
 
+Default branch is staging.
+
 Examples:
   curl -fsSL https://raw.githubusercontent.com/Rawi1005/st-autoinstall/main/install.sh | bash
-  curl -fsSL https://raw.githubusercontent.com/Rawi1005/st-autoinstall/main/install.sh | bash -s -- --branch release
-  curl -fsSL https://raw.githubusercontent.com/Rawi1005/st-autoinstall/main/install.sh | bash -s -- --mode repair --no-launch
+  curl -fsSL https://raw.githubusercontent.com/Rawi1005/st-autoinstall/main/install.sh | bash -s -- --mode repair
+  curl -fsSL https://raw.githubusercontent.com/Rawi1005/st-autoinstall/main/install.sh | bash -s -- --no-launch
 
 Options:
   --branch release|staging
@@ -62,6 +65,18 @@ done
 
 case "$ST_MODE" in prompt|repair|backup|delete|cancel) ;; *) die "Bad --mode: $ST_MODE" ;; esac
 
+mkdir -p "$HOME/.local/bin"
+export PATH="$HOME/.local/bin:${PATH:-}"
+
+persist_user_bin(){
+  local rc="$HOME/.bashrc"
+  local line='export PATH="$HOME/.local/bin:$PATH"'
+  mkdir -p "$HOME/.local/bin"
+  if [ ! -f "$rc" ] || ! grep -Fq '.local/bin' "$rc"; then
+    printf '\n# Added by SillyTavern auto-installer\n%s\n' "$line" >> "$rc"
+  fi
+}
+
 detect_prefix(){
   if [ -n "${PREFIX:-}" ]; then echo "$PREFIX"
   elif [ -d /data/data/com.termux/files/usr ]; then echo /data/data/com.termux/files/usr
@@ -71,6 +86,9 @@ detect_prefix(){
 }
 
 TERMUX_PREFIX="$(detect_prefix)"
+export TMPDIR="${TMPDIR:-$TERMUX_PREFIX/tmp}"
+mkdir -p "$TMPDIR"
+
 ARCH="$(uname -m 2>/dev/null || echo unknown)"
 MEM_KB="$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
 MEM_GB=$(( MEM_KB / 1024 / 1024 ))
@@ -129,31 +147,35 @@ install_packages(){
   pm_update
   pm_upgrade
 
-  info "Installing git, node, npm, yarn, build tools..."
-  if ! pm_install git nodejs-lts yarn python make clang nano; then
-    warn "nodejs-lts failed; trying nodejs."
-    pm_install git nodejs yarn python make clang nano
+  info "Installing base packages..."
+  if ! pm_install git nodejs-lts yarn python make clang tar nano; then
+    warn "nodejs-lts package failed; trying nodejs."
+    pm_install git nodejs yarn python make clang tar nano
   fi
 
-  pm_install esbuild || warn "Termux esbuild package failed; npm global fallback will be tried."
+  pm_install esbuild || warn "esbuild package failed; npm fallback will be used after npm is healthy."
 }
 
-ensure_cmd(){
+ensure_cmd_pkg(){
   local cmd="$1" pkg="$2"
-  command -v "$cmd" >/dev/null 2>&1 && { ok "$cmd: $(command -v "$cmd")"; return 0; }
-  warn "$cmd missing; reinstalling $pkg."
+  if command -v "$cmd" >/dev/null 2>&1; then
+    ok "$cmd: $(command -v "$cmd")"
+    return 0
+  fi
+  warn "$cmd missing; trying to install/reinstall package: $pkg"
   pm_reinstall "$pkg" || true
   command -v "$cmd" >/dev/null 2>&1
 }
 
-node_health(){
-  ensure_cmd node nodejs-lts || ensure_cmd node nodejs || die "node not found."
-  ensure_cmd npm nodejs-lts || ensure_cmd npm nodejs || die "npm not found."
-
+check_node_version(){
   local major
   major="$(node -e "console.log(Number(process.versions.node.split('.')[0]) || 0)" 2>/dev/null || echo 0)"
   [ "$major" -ge "$MIN_NODE_MAJOR" ] || die "Node $(node -v 2>/dev/null || echo unknown) is too old. Need Node $MIN_NODE_MAJOR+."
+}
 
+ensure_node(){
+  ensure_cmd_pkg node nodejs-lts || ensure_cmd_pkg node nodejs || die "Node.js could not be installed. Try: pkg change-repo"
+  check_node_version
   node --input-type=commonjs <<'NODECHECK'
 const fs = require('fs');
 const os = require('os');
@@ -163,94 +185,184 @@ fs.writeFileSync(path.join(tmp, 'ok.txt'), 'ok');
 fs.rmSync(tmp, {recursive: true, force: true});
 console.log('Node core modules OK');
 NODECHECK
+  ok "Node: $(node -v)"
 }
 
-npm_health(){
-  info "Checking npm health..."
-  npm --version >/dev/null || die "npm cannot run."
-  npm config list >/dev/null || die "npm config is broken."
+make_user_npm_wrapper(){
+  local npm_cli="$1"
+  local npx_cli="$2"
+  persist_user_bin
+  mkdir -p "$HOME/.local/bin"
+  cat > "$HOME/.local/bin/npm" <<WRAPNPM
+#!/usr/bin/env sh
+exec node "$npm_cli" "\$@"
+WRAPNPM
+  chmod +x "$HOME/.local/bin/npm"
+  if [ -n "$npx_cli" ] && [ -f "$npx_cli" ]; then
+    cat > "$HOME/.local/bin/npx" <<WRAPNPX
+#!/usr/bin/env sh
+exec node "$npx_cli" "\$@"
+WRAPNPX
+    chmod +x "$HOME/.local/bin/npx"
+  fi
+  export PATH="$HOME/.local/bin:$PATH"
+  hash -r || true
+}
 
+repair_npm_from_existing_files(){
+  local npm_cli npx_cli base
+  for base in \
+    "$TERMUX_PREFIX/lib/node_modules/npm" \
+    "$TERMUX_PREFIX/lib/nodejs/npm" \
+    "$HOME/.local/share/st-autoinstall/npm/package"; do
+    npm_cli="$base/bin/npm-cli.js"
+    npx_cli="$base/bin/npx-cli.js"
+    if [ -f "$npm_cli" ]; then
+      warn "npm files exist but npm command is missing. Creating user wrapper."
+      make_user_npm_wrapper "$npm_cli" "$npx_cli"
+      command -v npm >/dev/null 2>&1 && return 0
+    fi
+  done
+  return 1
+}
+
+bootstrap_npm_for_user(){
+  warn "npm is still missing. Installing npm for this user into ~/.local without sudo/root."
+  persist_user_bin
+  mkdir -p "$HOME/.local/share/st-autoinstall/npm" "$HOME/.local/bin"
+  rm -rf "$HOME/.local/share/st-autoinstall/npm/package"
+
+  local tmp_tgz
+  tmp_tgz="$(mktemp "${TMPDIR:-/tmp}/npm.XXXXXX.tgz")"
+
+  node --input-type=module - "$tmp_tgz" <<'BOOTSTRAPNPM'
+import { writeFile } from 'node:fs/promises';
+const out = process.argv[2];
+const metaRes = await fetch('https://registry.npmjs.org/npm/latest', { headers: { accept: 'application/json' } });
+if (!metaRes.ok) throw new Error(`npm registry failed: ${metaRes.status}`);
+const meta = await metaRes.json();
+const tarball = meta?.dist?.tarball;
+if (!tarball) throw new Error('npm registry response did not include a tarball');
+const tarRes = await fetch(tarball);
+if (!tarRes.ok) throw new Error(`npm tarball download failed: ${tarRes.status}`);
+await writeFile(out, Buffer.from(await tarRes.arrayBuffer()));
+console.log(`Downloaded npm ${meta.version}`);
+BOOTSTRAPNPM
+
+  tar -xzf "$tmp_tgz" -C "$HOME/.local/share/st-autoinstall/npm"
+  rm -f "$tmp_tgz"
+
+  make_user_npm_wrapper \
+    "$HOME/.local/share/st-autoinstall/npm/package/bin/npm-cli.js" \
+    "$HOME/.local/share/st-autoinstall/npm/package/bin/npx-cli.js"
+
+  command -v npm >/dev/null 2>&1 || return 1
+}
+
+ensure_npm(){
+  info "Checking npm. If missing, it will be installed for this user."
+
+  if command -v npm >/dev/null 2>&1; then
+    ok "npm found: $(command -v npm)"
+  else
+    repair_npm_from_existing_files || true
+  fi
+
+  if ! command -v npm >/dev/null 2>&1; then
+    warn "npm command not found. Reinstalling Node.js package first."
+    pm_reinstall nodejs-lts || pm_reinstall nodejs || true
+    hash -r || true
+    repair_npm_from_existing_files || true
+  fi
+
+  if ! command -v npm >/dev/null 2>&1; then
+    warn "Trying separate npm package if available."
+    pm_install npm || true
+    hash -r || true
+    repair_npm_from_existing_files || true
+  fi
+
+  if ! command -v npm >/dev/null 2>&1; then
+    bootstrap_npm_for_user || die "npm could not be installed even with user-local fallback."
+  fi
+
+  npm --version >/dev/null || die "npm exists but cannot run."
+
+  npm config set prefix "$HOME/.local" --location=user >/dev/null 2>&1 || npm config set prefix "$HOME/.local" >/dev/null 2>&1 || true
   npm config set fund false --location=user >/dev/null 2>&1 || npm config set fund false >/dev/null 2>&1 || true
   npm config set audit false --location=user >/dev/null 2>&1 || npm config set audit false >/dev/null 2>&1 || true
   npm config set progress false --location=user >/dev/null 2>&1 || npm config set progress false >/dev/null 2>&1 || true
 
-  local prefix cache
-  prefix="$(npm config get prefix 2>/dev/null | tail -n 1 || true)"
-  if [ -z "$prefix" ] || [ "$prefix" = undefined ] || [ "$prefix" = null ] || [ ! -w "$prefix" ]; then
-    warn "npm prefix is bad or not writable. Setting prefix to Termux prefix."
-    npm config set prefix "$TERMUX_PREFIX" >/dev/null
-    prefix="$TERMUX_PREFIX"
-  fi
-  export PATH="$prefix/bin:$TERMUX_PREFIX/bin:$PATH"
-
+  local cache
   cache="$(npm config get cache 2>/dev/null | tail -n 1 || true)"
   if [ -z "$cache" ] || [ "$cache" = undefined ] || [ "$cache" = null ]; then
-    npm config set cache "$HOME/.npm" >/dev/null
+    npm config set cache "$HOME/.npm" >/dev/null 2>&1 || true
     cache="$HOME/.npm"
   fi
   mkdir -p "$cache"
   [ -w "$cache" ] || die "npm cache is not writable: $cache"
   npm cache verify >/dev/null 2>&1 || npm cache clean --force >/dev/null 2>&1 || true
-  ok "npm: $(npm -v)"
+
+  ok "npm: $(npm -v) at $(command -v npm)"
 }
 
-yarn_health(){
-  info "Checking Yarn health..."
+ensure_yarn(){
+  info "Checking Yarn. If missing, it will be installed for this user."
+
   if ! command -v yarn >/dev/null 2>&1; then
-    pm_reinstall yarn || true
+    warn "Yarn command missing; trying package manager."
+    pm_reinstall yarn || pm_install yarn || true
+    hash -r || true
   fi
+
   if ! command -v yarn >/dev/null 2>&1; then
-    warn "Installing Yarn Classic via npm."
+    warn "Installing Yarn Classic for this user using npm."
     npm install -g yarn@1
-    hash -r
+    hash -r || true
   fi
 
   command -v yarn >/dev/null 2>&1 || die "Yarn could not be installed."
-  local ver major cache
+
+  local ver major
   ver="$(yarn --version 2>/dev/null | tail -n 1 || true)"
   [ -n "$ver" ] || die "Yarn exists but cannot run."
   major="$(printf "%s" "$ver" | cut -d. -f1)"
   if [ "$major" -ge 2 ] 2>/dev/null; then
-    warn "Yarn $ver detected; installing Yarn Classic v1."
+    warn "Yarn $ver detected. Installing Yarn Classic v1 for node_modules compatibility."
     npm install -g yarn@1
-    hash -r
+    hash -r || true
   fi
 
   yarn config set network-timeout 600000 >/dev/null 2>&1 || true
   yarn config set progress false >/dev/null 2>&1 || true
-  cache="$(yarn cache dir 2>/dev/null | tail -n 1 || true)"
-  [ -n "$cache" ] && mkdir -p "$cache" || true
-  ok "Yarn: $(yarn --version)"
+  ok "Yarn: $(yarn --version) at $(command -v yarn)"
 }
 
-esbuild_health(){
-  info "Checking esbuild..."
-  if command -v esbuild >/dev/null 2>&1; then ok "esbuild: $(esbuild --version 2>/dev/null || echo unknown)"; return 0; fi
-  pm_reinstall esbuild || true
-  if command -v esbuild >/dev/null 2>&1; then ok "esbuild: $(esbuild --version 2>/dev/null || echo unknown)"; return 0; fi
-  warn "Installing esbuild globally via npm."
-  npm install -g esbuild || true
-  hash -r
-  command -v esbuild >/dev/null 2>&1 || die "esbuild missing. Try: pkg change-repo"
+ensure_esbuild(){
+  info "Checking esbuild."
+  if command -v esbuild >/dev/null 2>&1; then
+    ok "esbuild: $(esbuild --version 2>/dev/null || echo unknown)"
+    return 0
+  fi
+  pm_reinstall esbuild || pm_install esbuild || true
+  hash -r || true
+  if ! command -v esbuild >/dev/null 2>&1; then
+    warn "Installing esbuild for this user using npm."
+    npm install -g esbuild
+    hash -r || true
+  fi
+  command -v esbuild >/dev/null 2>&1 || die "esbuild could not be installed."
   ok "esbuild: $(esbuild --version 2>/dev/null || echo unknown)"
 }
 
 stack_health(){
   info "Preflight: checking git, Node.js, npm, Yarn, and esbuild before node_modules install."
-  ensure_cmd git git || die "git not found."
-  node_health
-  npm_health
-  yarn_health
-  esbuild_health
+  ensure_cmd_pkg git git || die "git could not be installed."
+  ensure_node
+  ensure_npm
+  ensure_yarn
+  ensure_esbuild
   ok "Stack healthy: node $(node -v), npm $(npm -v), yarn $(yarn --version)"
-}
-
-repair_stack_once(){
-  warn "Health check failed. Repairing packages once..."
-  pm_update
-  pm_reinstall git nodejs-lts yarn python make clang nano || pm_reinstall git nodejs yarn python make clang nano || true
-  pm_reinstall esbuild || true
-  hash -r
 }
 
 handle_existing(){
@@ -312,7 +424,7 @@ clone_or_update(){
 }
 
 project_health(){
-  info "Checking package.json, server.js, and old node_modules..."
+  info "Checking package.json, server.js, and old node_modules."
   [ -f package.json ] || die "package.json missing."
   [ -f server.js ] || die "server.js missing."
   node --input-type=commonjs <<'PROJECTCHECK'
@@ -342,7 +454,7 @@ NMCHECK
 }
 
 clean_frontend_cache(){
-  info "Cleaning generated frontend/cache folders..."
+  info "Cleaning generated frontend/cache folders."
   for p in public/lib dist cache; do
     [ -e "$p" ] || continue
     if [ "$p" = cache ] || git check-ignore -q "$p" 2>/dev/null; then
@@ -358,22 +470,22 @@ yarn_install(){
   if [ "$LOW_RESOURCE" -eq 1 ]; then
     warn "Low-memory/old CPU detected; using safer Yarn settings."
     export NODE_OPTIONS="--max-old-space-size=2048 ${NODE_OPTIONS:-}"
-    args+=(--network-concurrency 1 --ignore-optional)
+    args+=(--network-concurrency 1)
   else
     export NODE_OPTIONS="--max-old-space-size=4096 ${NODE_OPTIONS:-}"
   fi
 
-  info "Installing node_modules with Yarn..."
+  info "Installing node_modules with Yarn."
   if ! yarn "${args[@]}"; then
     warn "Yarn failed. Cleaning cache and retrying once."
     yarn cache clean >/dev/null 2>&1 || true
     rm -rf node_modules
-    yarn install --non-interactive --check-files --network-timeout 600000 --network-concurrency 1 --ignore-optional
+    yarn install --non-interactive --check-files --network-timeout 600000 --network-concurrency 1
   fi
 }
 
 verify_modules(){
-  info "Verifying node_modules after Yarn install..."
+  info "Verifying node_modules after Yarn install."
   [ -d node_modules ] || die "node_modules missing after Yarn install."
   node --input-type=commonjs <<'VERIFY'
 const fs = require('fs');
@@ -417,12 +529,13 @@ STARTYARN
 launch_or_finish(){
   printf "%b\n" "${GREEN}==============================================${NC}"
   printf "%b\n" "${GREEN}DONE. SillyTavern installed/repaired with Yarn.${NC}"
+  printf "%b\n" "${CYAN}Branch:${NC} $ST_BRANCH"
   printf "%b\n" "${CYAN}Start:${NC} cd \"$ST_DIR\" && bash start-yarn.sh"
   printf "%b\n" "${CYAN}Open:${NC} http://127.0.0.1:8000/"
   printf "%b\n" "${GREEN}==============================================${NC}"
 
   [ "$ST_LAUNCH" = "1" ] || return 0
-  info "Launching SillyTavern..."
+  info "Launching SillyTavern."
   cd "$ST_DIR"
   if [ "$ST_GLOBAL" = "1" ]; then ST_GLOBAL=1 bash ./start-yarn.sh; else bash ./start-yarn.sh; fi
 }
@@ -433,7 +546,7 @@ main(){
   command -v dpkg >/dev/null 2>&1 || die "dpkg not found."
   setup_apt
   install_packages
-  if ! stack_health; then repair_stack_once; stack_health; fi
+  stack_health
   handle_existing
   clone_or_update
   stack_health

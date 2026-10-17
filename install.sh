@@ -20,6 +20,8 @@ ST_SKIP_UPGRADE="${ST_SKIP_UPGRADE:-0}"
 
 MIN_NODE_MAJOR="${MIN_NODE_MAJOR:-20}"
 
+TERMUX_MAIN_REPO="${TERMUX_MAIN_REPO:-https://packages-cf.termux.dev/apt/termux-main}"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -138,8 +140,6 @@ persist_user_bin() {
   local rc="$HOME/.bashrc"
   local line='export PATH="$HOME/.local/bin:$PATH"'
 
-  mkdir -p "$HOME/.local/bin"
-
   if [ ! -f "$rc" ] || ! grep -Fq '.local/bin' "$rc"; then
     printf '\n# Added by SillyTavern auto-installer\n%s\n' "$line" >> "$rc"
   fi
@@ -214,6 +214,50 @@ APTCONF
   apt install -f -y || true
 }
 
+TERMUX_REPO_MIGRATED=0
+
+# Old Google Play builds of Termux point at Bintray (shut down in 2021) and
+# the frozen *-packages-24 repos. Any dead repo makes `pkg update` fail.
+DEAD_REPO_PATTERN='bintray\.com|-packages-24|termux-mirror\.ml|mentality\.rip'
+
+fix_termux_repos() {
+  local apt_etc="$TERMUX_PREFIX/etc/apt"
+  local list
+
+  [[ "$TERMUX_PREFIX" == *com.termux* ]] || return 0
+
+  for list in "$apt_etc"/sources.list.d/*.list; do
+    [ -f "$list" ] || continue
+
+    if grep -Eq "$DEAD_REPO_PATTERN" "$list"; then
+      warn "Disabling dead repo: $(basename "$list")"
+      mv "$list" "$list.disabled"
+    fi
+  done
+
+  if grep -Eq "$DEAD_REPO_PATTERN" "$apt_etc/sources.list" 2>/dev/null; then
+    warn "Old Termux repo detected. Switching to $TERMUX_MAIN_REPO"
+    cp "$apt_etc/sources.list" "$apt_etc/sources.list.st-backup"
+    printf 'deb %s stable main\n' "$TERMUX_MAIN_REPO" > "$apt_etc/sources.list"
+    TERMUX_REPO_MIGRATED=1
+  fi
+}
+
+die_old_termux() {
+  local apt_etc="$TERMUX_PREFIX/etc/apt"
+
+  if [ -f "$apt_etc/sources.list.st-backup" ]; then
+    mv "$apt_etc/sources.list.st-backup" "$apt_etc/sources.list"
+  fi
+
+  printf "%b\n" "${RED}This Termux app is too old (old Google Play build).${NC}" >&2
+  printf "%s\n" "Its package repos are shut down, so nothing can be installed." >&2
+  printf "%s\n" "Uninstall Termux, install the current version from one of these, then run the installer again:" >&2
+  printf "%s\n" "  F-Droid: https://f-droid.org/packages/com.termux/" >&2
+  printf "%s\n" "  GitHub:  https://github.com/termux/termux-app/releases" >&2
+  exit 1
+}
+
 pm_update() {
   if command -v pkg >/dev/null 2>&1; then
     pkg update -y
@@ -252,8 +296,15 @@ pm_reinstall() {
 }
 
 install_packages() {
+  fix_termux_repos
+
   info "Updating packages..."
-  pm_update
+  if ! pm_update; then
+    [ "$TERMUX_REPO_MIGRATED" = "1" ] && die_old_termux
+    die "Package update failed. Run: termux-change-repo, then run this installer again."
+  fi
+  rm -f "$TERMUX_PREFIX/etc/apt/sources.list.st-backup"
+
   pm_upgrade
 
   info "Installing base packages..."
@@ -264,10 +315,6 @@ install_packages() {
     warn "nodejs-lts failed. Trying nodejs."
     pm_install nodejs
   fi
-
-  info "Installing Yarn and esbuild if available from package manager..."
-  pm_install yarn || warn "Yarn package failed. npm fallback will install Yarn later."
-  pm_install esbuild || warn "esbuild package failed. npm fallback will install esbuild later."
 }
 
 ensure_cmd_pkg() {
@@ -315,7 +362,6 @@ make_user_npm_wrapper() {
   local npx_cli="$2"
 
   persist_user_bin
-  mkdir -p "$HOME/.local/bin"
 
   cat > "$HOME/.local/bin/npm" <<WRAPNPM
 #!/usr/bin/env sh
@@ -369,7 +415,6 @@ bootstrap_npm_for_user() {
   persist_user_bin
 
   mkdir -p "$HOME/.local/share/st-autoinstall/npm"
-  mkdir -p "$HOME/.local/bin"
   rm -rf "$HOME/.local/share/st-autoinstall/npm/package"
 
   local tmp_tgz
@@ -803,14 +848,6 @@ prepare_official_start() {
   cd "$ST_DIR"
 
   chmod +x start.sh || true
-
-  if [ -f "webpack.config.js" ]; then
-    if grep -q "ST_TERMUX_WEBPACK_HOTFIX" "webpack.config.js" 2>/dev/null; then
-      warn "Removing old installer Webpack hotfix and restoring official webpack.config.js."
-      git restore webpack.config.js 2>/dev/null || git checkout -- webpack.config.js 2>/dev/null || true
-    fi
-  fi
-
   clean_runtime_caches
 
   ok "Official start.sh is ready."
@@ -877,11 +914,8 @@ main() {
 
   handle_existing
   clone_or_update
-
-  stack_health
   project_health
 
-  clean_runtime_caches
   yarn_install
   verify_modules
 

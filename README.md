@@ -21,6 +21,9 @@ Install **SillyTavern** (staging branch) on Android with Termux in one step—no
 - `bash: not found`
 - `curl: not found`
 
+**Use Termux from [F-Droid](https://f-droid.org/packages/com.termux/) or [GitHub](https://github.com/termux/termux-app/releases).**
+The old Google Play version uses shut-down package repos (errors mentioning `bintray.com` or `termux-packages-24`), and installs will fail.
+
 Run this in Termux first:
 ```bash
 pkg update && pkg install -y curl bash
